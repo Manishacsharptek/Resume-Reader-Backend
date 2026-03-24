@@ -31,7 +31,8 @@ import { sendOtpMail } from "../utils/mail.js";
 
 export const signup = async (req, res) => {
   try {
-    const { fullName, email, password, mobile, role } = req.body;
+    const { name, fullName, email, password } = req.body;
+    const userName = fullName || name;
 
     let user = await User.findOne({ email });
     if (user) {
@@ -42,17 +43,13 @@ export const signup = async (req, res) => {
       return res.status(400).json({ message: "Password must be at least 6 characters" });
     }
 
-    if (!mobile || mobile.length < 10) {
-      return res.status(400).json({ message: "Mobile number must be at least 10 digits" });
-    }
+
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
     user = await User.create({
-      fullName,
+      fullName: userName,
       email,
-      mobile,
-      role,
       password: hashedPassword
     });
 

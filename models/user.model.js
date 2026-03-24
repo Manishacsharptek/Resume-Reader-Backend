@@ -14,13 +14,12 @@ const userSchema = new mongoose.Schema({
         required: "true"
     },
     mobile: {
-        type: "string",
-        required: "true"
+        type: "string"
     },
     role: {
         type: "string",
         enum: ["user", "owner", "deliveryBoy"],
-        required: "true"
+        default: "user"
     },
     resetotp: {
         type: "string"

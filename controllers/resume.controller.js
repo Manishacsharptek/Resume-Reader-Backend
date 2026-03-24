@@ -1,50 +1,131 @@
 import fs from 'fs';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
-const pdfParse = require('pdf-parse');
+const pdfParse = require('pdf-parse-fork');
 import { parseResumeText } from '../utils/resumeParser.js';
 import { scoreResumeText } from '../utils/resumeScorer.js';
+import { getGeminiSuggestions } from '../utils/geminiAi.js';
 
 const uploadResume = async (req, res) => {
+    // Default data returned when PDF cannot be read — user still reaches the score page
+    const defaultData = {
+        profile: { name: "User", email: "", phone: "", skills: [] },
+        scores: { overall: 0, impact: 0, brevity: 0, style: 0, skills: 0 },
+        recommendations: [],
+        fixes: [],
+        goods: [],
+        overallScore: 0,
+        rawText: ""
+    };
+
+    if (!req.file) {
+        return res.status(200).json({ success: true, data: defaultData });
+    }
+
+    const filePath = req.file.path;
+    const parseFn = typeof pdfParse === 'function' ? pdfParse : (pdfParse.default || pdfParse);
+    let rawText = "";
+    let parsed = false;
+
     try {
-        if (!req.file) {
-            return res.status(400).json({ success: false, message: 'No file uploaded.' });
+        let fileData = fs.readFileSync(filePath);
+
+        // Only attempt PDF strategies if file starts with %PDF header
+        const isPdf = fileData.toString('utf8', 0, 4) === '%PDF';
+        if (isPdf) {
+            // Strategy 1: trim after %%EOF and parse
+            try {
+                const eofIdx = fileData.lastIndexOf('%%EOF');
+                const cleaned = eofIdx !== -1 ? fileData.slice(0, eofIdx + 5) : fileData;
+                const result = await parseFn(cleaned);
+                rawText = result.text;
+                parsed = true;
+            } catch { /* try next strategy */ }
+
+            // Strategy 2: strip bytes before %PDF header
+            if (!parsed) {
+                try {
+                    const headerIdx = fileData.indexOf('%PDF');
+                    const trimmed = headerIdx > 0 ? fileData.slice(headerIdx) : fileData;
+                    const result = await parseFn(trimmed);
+                    rawText = result.text;
+                    parsed = true;
+                } catch { /* try next strategy */ }
+            }
+
+            // Strategy 3: use raw original bytes without any modification
+            if (!parsed) {
+                try {
+                    const raw = fs.readFileSync(filePath);
+                    const result = await parseFn(raw);
+                    rawText = result.text;
+                    parsed = true;
+                } catch { /* all strategies exhausted — use default data */ }
+            }
         }
+        // Non-PDF (DOCX etc.) simply falls through with parsed=false → returns default scores
+    } catch {
+        // File read error — fall through to default
+    }
 
-        const filePath = req.file.path;
-        const fileData = fs.readFileSync(filePath);
+    // Always clean up the temp file
+    try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch { /* ignore */ }
 
-        // Parse PDF to text - handle both ES Module and CommonJS exports
-        const parseFn = typeof pdfParse === 'function' ? pdfParse : (pdfParse.default || pdfParse);
-        const pdfData = await parseFn(fileData);
-        const rawText = pdfData.text;
+    // If we couldn't parse at all, return default data — user still goes to score page
+    if (!parsed || !rawText.trim()) {
+        return res.status(200).json({ success: true, data: defaultData });
+    }
 
-        // Parse extracted text to JSON using our utility
-        const parsedProfile = parseResumeText(rawText);
-
-        // Run dynamic scoring heuristics
-        const scoringData = scoreResumeText(rawText);
-
-        // Clean up the temporarily uploaded file
-        fs.unlinkSync(filePath);
-
-        res.status(200).json({
+    // Happy path — parse and score
+    try {
+        const parserResult = parseResumeText(rawText);
+        const scorerResult = scoreResumeText(rawText);
+        return res.status(200).json({
             success: true,
-            data: parsedProfile,
-            scoring: scoringData,
-            message: 'Resume parsed and scored successfully.'
+            data: {
+                profile: parserResult.profile,
+                scores: parserResult.scores,
+                recommendations: parserResult.recommendations,
+                fixes: scorerResult.fixes,
+                goods: scorerResult.goods,
+                overallScore: parserResult.scores.overall,
+                rawText
+            }
         });
-
-    } catch (error) {
-        console.error('Error parsing resume:', error);
-        
-        // Clean up temp file on error if it exists
-        if (req.file && req.file.path && fs.existsSync(req.file.path)) {
-            fs.unlinkSync(req.file.path);
-        }
-
-        res.status(500).json({ success: false, message: `Server error during parsing: ${error.message}` });
+    } catch {
+        // Scorer crashed — still return default so user never sees an error
+        return res.status(200).json({ success: true, data: defaultData });
     }
 };
 
-export { uploadResume };
+const getAiInsights = async (req, res) => {
+    try {
+        const { rawText } = req.body;
+
+        if (!rawText) {
+            return res.status(400).json({ success: false, message: 'Missing rawText in request body.' });
+        }
+
+        // Get AI suggestions from Gemini
+        const aiResult = await getGeminiSuggestions(rawText);
+
+        res.status(200).json({
+            success: true,
+            data: {
+                aiSuggestions: aiResult.suggestions,
+                aiMeta: {
+                    isLive: aiResult.isLive,
+                    wordCount: aiResult.wordCount,
+                    count: aiResult.suggestions.length
+                }
+            },
+            message: 'AI insights generated successfully.'
+        });
+
+    } catch (error) {
+        console.error('Error generating AI insights:', error);
+        res.status(500).json({ success: false, message: `Server error generating AI insights: ${error.message}` });
+    }
+};
+
+export { uploadResume, getAiInsights };
